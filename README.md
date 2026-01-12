@@ -95,8 +95,17 @@ Once running, the server exposes these endpoints:
 | GET | `/api/projects` | List all active project instances |
 | POST | `/api/projects/:folder/start` | Start OpenCode server for a folder |
 | DELETE | `/api/projects/:folder/stop` | Stop OpenCode server |
-| POST | `/api/projects/:folder/message` | Send message to OpenCode |
 | GET | `/api/projects/:folder/sessions` | List OpenCode sessions |
+| GET | `/api/projects/:folder/sessions/:id/status` | Get session status and messages |
+
+### Messaging
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/projects/:folder/message` | Send message (sync, may timeout) |
+| POST | `/api/projects/:folder/message?async=true` | Send message (async, returns immediately) |
+| POST | `/api/projects/:folder/message/stream` | Send message with SSE streaming response |
+| GET | `/api/projects/:folder/events` | Subscribe to SSE event stream |
 
 ### Tailscale Proxy
 
@@ -121,10 +130,66 @@ curl -X POST http://localhost:3000/api/projects/my-app/start
 
 ### Send a message to OpenCode
 
+There are three ways to send messages, depending on your needs:
+
+#### Sync Mode (simple, may timeout for long operations)
+
 ```bash
 curl -X POST http://localhost:3000/api/projects/my-app/message \
   -H "Content-Type: application/json" \
   -d '{"message": "What does this project do?"}'
+```
+
+#### Async Mode (returns immediately, poll for results)
+
+```bash
+# Send message - returns immediately with session ID
+curl -X POST http://localhost:3000/api/projects/my-app/message \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Refactor the auth module", "async": true}'
+
+# Response: {"sessionId": "abc123", "status": "processing", "statusUrl": "..."}
+
+# Poll for status and messages
+curl http://localhost:3000/api/projects/my-app/sessions/abc123/status
+```
+
+#### Streaming Mode (real-time SSE, recommended for long operations)
+
+```bash
+curl -N -X POST http://localhost:3000/api/projects/my-app/message/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Build a new feature"}'
+```
+
+Returns Server-Sent Events:
+```
+event: session.created
+data: {"sessionId":"abc123"}
+
+event: message.part.updated
+data: {"delta":"I'll help you build"}
+
+event: message.part.updated
+data: {"delta":" that feature..."}
+
+event: session.idle
+data: {"sessionID":"abc123"}
+
+event: done
+data: {"sessionId":"abc123"}
+```
+
+### Subscribe to project events
+
+Stream all events for a project (useful for building UIs):
+
+```bash
+# All events
+curl -N http://localhost:3000/api/projects/my-app/events
+
+# Filter by session
+curl -N http://localhost:3000/api/projects/my-app/events?sessionId=abc123
 ```
 
 ### Expose project via Tailscale

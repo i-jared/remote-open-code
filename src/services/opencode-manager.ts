@@ -1,4 +1,4 @@
-import type { Project, OpenCodeMessage, OpenCodeResponse } from '../types';
+import type { Project, OpenCodeMessage, OpenCodeResponse, OpenCodeAsyncResponse, SessionStatus, SessionMessage } from '../types';
 import { portManager } from '../utils/port-manager';
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk/client';
 
@@ -142,7 +142,70 @@ export class OpenCodeManager {
   }
 
   /**
-   * Send a message to an OpenCode instance
+   * Ensure a session exists for a folder, creating one if needed
+   */
+  private async ensureSession(folder: string, sessionId?: string): Promise<string> {
+    const client = this.getClient(folder);
+    
+    if (sessionId) {
+      return sessionId;
+    }
+
+    const createResult = await client.session.create();
+    if (createResult.error) {
+      throw new Error(`Failed to create session: ${JSON.stringify(createResult.error)}`);
+    }
+    const newSessionId = createResult.data?.id;
+    if (!newSessionId) {
+      throw new Error('Failed to create session: no session ID returned');
+    }
+    return newSessionId;
+  }
+
+  /**
+   * Send a message to an OpenCode instance (async - returns immediately)
+   * Use getSessionStatus() to poll for results
+   */
+  async sendMessageAsync(
+    folder: string,
+    message: OpenCodeMessage
+  ): Promise<OpenCodeAsyncResponse> {
+    const project = this.projects.get(folder);
+    if (!project || project.status !== 'running' || !project.opencodePort) {
+      throw new Error(`OpenCode is not running for folder: ${folder}`);
+    }
+
+    try {
+      const client = this.getClient(folder);
+      const sessionId = await this.ensureSession(folder, message.sessionId);
+
+      // Send the message using promptAsync - returns immediately
+      const result = await client.session.promptAsync({
+        path: { id: sessionId },
+        body: {
+          parts: [{ type: 'text', text: message.message }],
+        },
+      });
+
+      if (result.error) {
+        throw new Error(`OpenCode API error: ${JSON.stringify(result.error)}`);
+      }
+
+      return {
+        sessionId,
+        status: 'processing',
+        statusUrl: `/api/projects/${folder}/sessions/${sessionId}/status`,
+      };
+    } catch (error) {
+      throw new Error(
+        `Failed to send message to OpenCode: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Send a message to an OpenCode instance (sync - waits for response)
+   * WARNING: May timeout for long-running operations. Use sendMessageAsync for better reliability.
    */
   async sendMessage(
     folder: string,
@@ -155,21 +218,9 @@ export class OpenCodeManager {
 
     try {
       const client = this.getClient(folder);
-      
-      // If no sessionId provided, create a new session
-      let sessionId = message.sessionId;
-      if (!sessionId) {
-        const createResult = await client.session.create();
-        if (createResult.error) {
-          throw new Error(`Failed to create session: ${JSON.stringify(createResult.error)}`);
-        }
-        sessionId = createResult.data?.id;
-        if (!sessionId) {
-          throw new Error('Failed to create session: no session ID returned');
-        }
-      }
+      const sessionId = await this.ensureSession(folder, message.sessionId);
 
-      // Send the message using the SDK's session.prompt method
+      // Send the message using the SDK's session.prompt method (waits for completion)
       const result = await client.session.prompt({
         path: { id: sessionId },
         body: {
@@ -189,6 +240,188 @@ export class OpenCodeManager {
       throw new Error(
         `Failed to send message to OpenCode: ${error instanceof Error ? error.message : String(error)}`
       );
+    }
+  }
+
+  /**
+   * Get the status and messages of a session
+   */
+  async getSessionStatus(folder: string, sessionId: string): Promise<SessionStatus> {
+    const project = this.projects.get(folder);
+    if (!project || project.status !== 'running' || !project.opencodePort) {
+      throw new Error(`OpenCode is not running for folder: ${folder}`);
+    }
+
+    try {
+      const client = this.getClient(folder);
+      
+      // Get session status
+      const statusResult = await client.session.status({ path: { id: sessionId } });
+      if (statusResult.error) {
+        throw new Error(`Failed to get session status: ${JSON.stringify(statusResult.error)}`);
+      }
+
+      // Get messages
+      const messagesResult = await client.session.messages({ path: { id: sessionId } });
+      if (messagesResult.error) {
+        throw new Error(`Failed to get session messages: ${JSON.stringify(messagesResult.error)}`);
+      }
+
+      const rawMessages = messagesResult.data || [];
+      const messages: SessionMessage[] = rawMessages.map((m: Record<string, unknown>) => ({
+        id: (m.id as string) || '',
+        role: (m.role as 'user' | 'assistant') || 'assistant',
+        content: this.extractMessageContent(m),
+        time: m.time as { start: number; end?: number } | undefined,
+      }));
+
+      // Determine status from session data
+      const sessionData = statusResult.data as Record<string, unknown> | undefined;
+      let status: 'idle' | 'running' | 'error' = 'idle';
+      if (sessionData?.status === 'running' || sessionData?.busy) {
+        status = 'running';
+      } else if (sessionData?.error) {
+        status = 'error';
+      }
+
+      return {
+        sessionId,
+        status,
+        messages,
+      };
+    } catch (error) {
+      throw new Error(
+        `Failed to get session status: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Extract text content from a message object
+   */
+  private extractMessageContent(message: Record<string, unknown>): string {
+    // Messages may have different structures depending on the type
+    if (typeof message.content === 'string') {
+      return message.content;
+    }
+    if (Array.isArray(message.parts)) {
+      return message.parts
+        .filter((p: Record<string, unknown>) => p.type === 'text')
+        .map((p: Record<string, unknown>) => p.text || '')
+        .join('\n');
+    }
+    return JSON.stringify(message);
+  }
+
+  /**
+   * Subscribe to OpenCode events and stream them via SSE
+   * Returns an async generator that yields events
+   */
+  async *streamEvents(
+    folder: string,
+    sessionId?: string
+  ): AsyncGenerator<{ type: string; data: unknown }, void, unknown> {
+    const project = this.projects.get(folder);
+    if (!project || project.status !== 'running' || !project.opencodePort) {
+      throw new Error(`OpenCode is not running for folder: ${folder}`);
+    }
+
+    const client = this.getClient(folder);
+    
+    // Subscribe to the event stream
+    const result = await client.event.subscribe();
+    
+    // Iterate through the stream and yield filtered events
+    for await (const event of result.stream) {
+      const eventData = event as Record<string, unknown>;
+      
+      // If sessionId filter is provided, only yield events for that session
+      if (sessionId) {
+        const props = eventData.properties as Record<string, unknown> | undefined;
+        const part = props?.part as Record<string, unknown> | undefined;
+        const eventSessionId = props?.sessionID || part?.sessionID;
+        if (eventSessionId && eventSessionId !== sessionId) {
+          continue;
+        }
+      }
+
+      yield {
+        type: eventData.type as string,
+        data: eventData.properties || eventData,
+      };
+    }
+  }
+
+  /**
+   * Send a message and stream responses via SSE
+   * Returns an async generator of events
+   */
+  async *sendMessageStream(
+    folder: string,
+    message: OpenCodeMessage
+  ): AsyncGenerator<{ type: string; data: unknown; done?: boolean }, void, unknown> {
+    const project = this.projects.get(folder);
+    if (!project || project.status !== 'running' || !project.opencodePort) {
+      throw new Error(`OpenCode is not running for folder: ${folder}`);
+    }
+
+    const client = this.getClient(folder);
+    const sessionId = await this.ensureSession(folder, message.sessionId);
+
+    // Emit the session ID first
+    yield {
+      type: 'session.created',
+      data: { sessionId },
+    };
+
+    // Start the event stream before sending the message
+    const eventResult = await client.event.subscribe();
+    
+    // Send the message asynchronously
+    const promptResult = await client.session.promptAsync({
+      path: { id: sessionId },
+      body: {
+        parts: [{ type: 'text', text: message.message }],
+      },
+    });
+
+    if (promptResult.error) {
+      yield {
+        type: 'error',
+        data: { error: JSON.stringify(promptResult.error) },
+        done: true,
+      };
+      return;
+    }
+
+    // Stream events until session becomes idle
+    for await (const event of eventResult.stream) {
+      const eventData = event as Record<string, unknown>;
+      const eventType = eventData.type as string;
+      const props = eventData.properties as Record<string, unknown> | undefined;
+      
+      // Filter events for this session
+      const part = props?.part as Record<string, unknown> | undefined;
+      const eventSessionId = props?.sessionID || part?.sessionID;
+      if (eventSessionId && eventSessionId !== sessionId) {
+        continue;
+      }
+
+      // Yield the event
+      yield {
+        type: eventType,
+        data: props || eventData,
+      };
+
+      // Stop streaming when session becomes idle
+      if (eventType === 'session.idle') {
+        yield {
+          type: 'done',
+          data: { sessionId },
+          done: true,
+        };
+        return;
+      }
     }
   }
 
