@@ -4,9 +4,27 @@
   "description": "Project manager server with OpenCode integration and Tailscale proxy",
   "type": "module",
   "main": "src/index.ts",
+  "bin": {
+    "remote-open-code": "src/index.ts"
+  },
   "scripts": {
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts"
+  },
+  "keywords": [
+    "opencode",
+    "ai",
+    "coding",
+    "assistant",
+    "tailscale",
+    "proxy",
+    "project-manager"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
   },
   "dependencies": {
     "@opencode-ai/sdk": "latest",

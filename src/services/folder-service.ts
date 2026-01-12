@@ -1,7 +1,8 @@
+import { readdir, stat } from 'node:fs/promises';
 import type { FolderInfo } from '../types';
 
 /**
- * Service for directory operations using Bun's native APIs
+ * Service for directory operations
  */
 export class FolderService {
   private baseDirectory: string;
@@ -15,7 +16,7 @@ export class FolderService {
    */
   async listFolders(): Promise<FolderInfo[]> {
     try {
-      const entries = await Bun.readdir(this.baseDirectory, { withFileTypes: true });
+      const entries = await readdir(this.baseDirectory, { withFileTypes: true });
 
       const folders: FolderInfo[] = [];
 
@@ -40,8 +41,8 @@ export class FolderService {
   async folderExists(folderName: string): Promise<boolean> {
     try {
       const path = `${this.baseDirectory}/${folderName}`;
-      const stat = await Bun.stat(path);
-      return stat.isDirectory();
+      const s = await stat(path);
+      return s.isDirectory();
     } catch {
       return false;
     }

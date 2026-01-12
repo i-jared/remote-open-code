@@ -1,143 +1,212 @@
 # Remote OpenCode Project Manager
 
-A TypeScript REST API server built with Bun that manages multiple project folders, spawns OpenCode.ai instances for each, and exposes projects via Tailscale proxy.
+A CLI tool that manages multiple project folders, spawns [OpenCode.ai](https://opencode.ai) instances for each, and exposes projects via Tailscale proxy.
 
-## Features
+## Quick Start
 
-- **Folder Management**: List and manage project folders in a directory
-- **OpenCode Integration**: Spawn and manage multiple OpenCode server instances
-- **Message Handling**: Send messages to OpenCode instances and receive responses
-- **Tailscale Proxy**: Expose project web applications via Tailscale serve/funnel
-- **Process Management**: Automatic port allocation and graceful shutdown
+```bash
+# Run instantly with bunx (recommended)
+bunx remote-open-code ~/projects
 
-## Prerequisites
-
-1. **Bun** - Install from [bun.sh](https://bun.sh)
-   ```bash
-   curl -fsSL https://bun.sh/install | bash
-   ```
-
-2. **OpenCode CLI** - Install globally or use via `bunx`
-   ```bash
-   npm install -g opencode
-   # or
-   bunx opencode
-   ```
-
-3. **Tailscale** - Install and configure Tailscale
-   - Install from [tailscale.com](https://tailscale.com/download)
-   - Authenticate your machine: `tailscale up`
+# Or with npx
+npx remote-open-code ~/projects
+```
 
 ## Installation
 
 ```bash
-# Install dependencies
-bun install
+# Global install with bun
+bun install -g remote-open-code
 
-# Run the server
-bun run dev
+# Or with npm
+npm install -g remote-open-code
+```
+
+Then run from anywhere:
+```bash
+remote-open-code ~/my-projects
+```
+
+## Prerequisites
+
+### Required
+
+**OpenCode CLI** — AI coding assistant
+```bash
+# macOS / Linux
+curl -fsSL https://opencode.ai/install.sh | sh
+```
+
+### Optional
+
+**Tailscale** — For exposing projects over your tailnet
+```bash
+# macOS
+brew install tailscale
+
+# Linux
+curl -fsSL https://tailscale.com/install.sh | sh
+
+# Then authenticate
+tailscale up
+```
+
+### Check Your Setup
+
+Run the doctor command to verify everything is installed:
+
+```bash
+remote-open-code --doctor
+```
+
+## Usage
+
+```bash
+# Run in current directory
+remote-open-code
+
+# Run in a specific directory
+remote-open-code ~/projects
+
+# Run on a custom port
+remote-open-code ~/projects --port 8080
+
+# Check dependencies
+remote-open-code --doctor
+
+# Show help
+remote-open-code --help
+```
+
+## API Endpoints
+
+Once running, the server exposes these endpoints:
+
+### Folders
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/folders` | List all project folders |
+
+### Projects
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/projects` | List all active project instances |
+| POST | `/api/projects/:folder/start` | Start OpenCode server for a folder |
+| DELETE | `/api/projects/:folder/stop` | Stop OpenCode server |
+| POST | `/api/projects/:folder/message` | Send message to OpenCode |
+| GET | `/api/projects/:folder/sessions` | List OpenCode sessions |
+
+### Tailscale Proxy
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/projects/:folder/serve` | Expose project via Tailscale |
+| DELETE | `/api/projects/:folder/serve` | Stop Tailscale proxy |
+
+## Examples
+
+### List available project folders
+
+```bash
+curl http://localhost:3000/api/folders
+```
+
+### Start OpenCode for a project
+
+```bash
+curl -X POST http://localhost:3000/api/projects/my-app/start
+```
+
+### Send a message to OpenCode
+
+```bash
+curl -X POST http://localhost:3000/api/projects/my-app/message \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What does this project do?"}'
+```
+
+### Expose project via Tailscale
+
+```bash
+curl -X POST http://localhost:3000/api/projects/my-app/serve \
+  -H "Content-Type: application/json" \
+  -d '{"localPort": 3001, "path": "/my-app"}'
+```
+
+Your project will be accessible at `https://your-machine.tailnet-name.ts.net/my-app`
+
+### Stop OpenCode for a project
+
+```bash
+curl -X DELETE http://localhost:3000/api/projects/my-app/stop
+```
+
+## How It Works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Your Machine                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │           Remote OpenCode Server (:3000)             │   │
+│  │                                                      │   │
+│  │   /api/folders ──► Lists ~/projects/*               │   │
+│  │   /api/projects/:name/start ──► Spawns OpenCode     │   │
+│  │   /api/projects/:name/serve ──► Tailscale Proxy     │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                           │                                  │
+│         ┌─────────────────┼─────────────────┐               │
+│         ▼                 ▼                 ▼               │
+│   ┌──────────┐     ┌──────────┐     ┌──────────┐           │
+│   │ Project A│     │ Project B│     │ Project C│           │
+│   │ OpenCode │     │ OpenCode │     │ OpenCode │           │
+│   │  :4001   │     │  :4002   │     │  :4003   │           │
+│   └──────────┘     └──────────┘     └──────────┘           │
+│         │                                                   │
+│         ▼                                                   │
+│   ┌──────────┐                                              │
+│   │Tailscale │──────► https://machine.ts.net/project-a     │
+│   │  Proxy   │                                              │
+│   └──────────┘                                              │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Configuration
 
-Set environment variables:
+### Environment Variables
 
-- `PORT` - Server port (default: 3000)
-- `BASE_DIRECTORY` - Directory to scan for projects (default: current working directory)
-- `TAILSCALE_HOSTNAME` - Your Tailscale machine hostname (for URL generation)
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORT` | Server port | `3000` |
+| `BASE_DIRECTORY` | Project directory | Current directory |
 
-## API Endpoints
+### Command Line Options
 
-### Folders
+| Option | Description |
+|--------|-------------|
+| `[directory]` | Project directory (positional argument) |
+| `-p, --port` | Server port |
+| `-d, --doctor` | Check dependencies |
+| `-v, --version` | Show version |
+| `-h, --help` | Show help |
 
-- `GET /api/folders` - List all project folders
-
-### Projects
-
-- `GET /api/projects` - List all active project instances
-- `POST /api/projects/:folder/start` - Start OpenCode server for a folder
-- `DELETE /api/projects/:folder/stop` - Stop OpenCode server
-- `POST /api/projects/:folder/message` - Send message to OpenCode
-  ```json
-  {
-    "message": "Your message here",
-    "sessionId": "optional-session-id"
-  }
-  ```
-- `GET /api/projects/:folder/sessions` - List OpenCode sessions
-
-### Tailscale
-
-- `POST /api/projects/:folder/serve` - Expose project via Tailscale
-  ```json
-  {
-    "localPort": 3000,
-    "path": "/project-name",
-    "public": false
-  }
-  ```
-- `DELETE /api/projects/:folder/serve` - Stop Tailscale proxy
-
-## Usage Example
+## Development
 
 ```bash
-# List available folders
-curl http://localhost:3000/api/folders
+# Clone the repo
+git clone https://github.com/your-username/remote-open-code.git
+cd remote-open-code
 
-# Start OpenCode for a project
-curl -X POST http://localhost:3000/api/projects/my-project/start
+# Install dependencies
+bun install
 
-# Send a message to OpenCode
-curl -X POST http://localhost:3000/api/projects/my-project/message \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Hello, OpenCode!"}'
+# Run locally
+bun run dev
 
-# Expose project via Tailscale
-curl -X POST http://localhost:3000/api/projects/my-project/serve \
-  -H "Content-Type: application/json" \
-  -d '{"localPort": 3000, "path": "/my-project"}'
-
-# Stop OpenCode
-curl -X DELETE http://localhost:3000/api/projects/my-project/stop
+# Run with a specific directory
+bun run dev ~/projects
 ```
-
-## Project Structure
-
-```
-remote-open-code/
-├── src/
-│   ├── index.ts              # Entry point (Bun.serve setup)
-│   ├── router.ts             # Request router/handler
-│   ├── handlers/
-│   │   ├── folders.ts        # Folder listing handlers
-│   │   ├── projects.ts       # Project/opencode management handlers
-│   │   └── tailscale.ts      # Tailscale proxy handlers
-│   ├── services/
-│   │   ├── folder-service.ts # Directory operations (using Bun APIs)
-│   │   ├── opencode-manager.ts # OpenCode process lifecycle (Bun.spawn)
-│   │   └── tailscale-service.ts # Tailscale CLI wrapper (Bun.spawn)
-│   ├── types/
-│   │   └── index.ts          # Type definitions
-│   └── utils/
-│       └── port-manager.ts   # Dynamic port allocation
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
-## Architecture
-
-- **Bun HTTP Server**: Native `Bun.serve` for high performance
-- **Process Management**: `Bun.spawn` for managing OpenCode and Tailscale processes
-- **File System**: Bun's native file APIs for directory operations
-- **Port Management**: Automatic port allocation to avoid conflicts
-
-## Graceful Shutdown
-
-The server handles SIGINT and SIGTERM signals gracefully:
-- Stops all OpenCode instances
-- Stops all Tailscale serves
-- Cleans up allocated ports
 
 ## License
 
