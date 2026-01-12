@@ -1,11 +1,34 @@
 import type { Project, OpenCodeMessage, OpenCodeResponse } from '../types';
 import { portManager } from '../utils/port-manager';
+import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk/client';
 
 /**
  * Manages OpenCode server instances for projects
  */
 export class OpenCodeManager {
   private projects = new Map<string, Project>();
+  private clients = new Map<string, OpencodeClient>();
+
+  /**
+   * Get or create an OpenCode SDK client for a project
+   */
+  private getClient(folder: string): OpencodeClient {
+    const existing = this.clients.get(folder);
+    if (existing) {
+      return existing;
+    }
+
+    const project = this.projects.get(folder);
+    if (!project || !project.opencodePort) {
+      throw new Error(`No OpenCode instance for folder: ${folder}`);
+    }
+
+    const client = createOpencodeClient({
+      baseUrl: `http://127.0.0.1:${project.opencodePort}`,
+    });
+    this.clients.set(folder, client);
+    return client;
+  }
 
   /**
    * Start an OpenCode server for a project folder
@@ -91,6 +114,9 @@ export class OpenCodeManager {
         portManager.releasePort(project.opencodePort);
       }
 
+      // Clean up the SDK client
+      this.clients.delete(folder);
+
       // Update status
       project.status = 'stopped';
       project.opencodeProcess = undefined;
@@ -128,31 +154,36 @@ export class OpenCodeManager {
     }
 
     try {
-      // Use the OpenCode SDK to send messages
-      // The SDK expects the base URL of the OpenCode server
-      const baseUrl = `http://127.0.0.1:${project.opencodePort}`;
+      const client = this.getClient(folder);
       
-      // For now, we'll use fetch to communicate with OpenCode's API
-      // The exact API endpoint depends on OpenCode's server implementation
-      const response = await fetch(`${baseUrl}/api/message`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          message: message.message,
-          sessionId: message.sessionId,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`OpenCode API error: ${response.statusText}`);
+      // If no sessionId provided, create a new session
+      let sessionId = message.sessionId;
+      if (!sessionId) {
+        const createResult = await client.session.create();
+        if (createResult.error) {
+          throw new Error(`Failed to create session: ${JSON.stringify(createResult.error)}`);
+        }
+        sessionId = createResult.data?.id;
+        if (!sessionId) {
+          throw new Error('Failed to create session: no session ID returned');
+        }
       }
 
-      const data = await response.json();
+      // Send the message using the SDK's session.prompt method
+      const result = await client.session.prompt({
+        path: { id: sessionId },
+        body: {
+          parts: [{ type: 'text', text: message.message }],
+        },
+      });
+
+      if (result.error) {
+        throw new Error(`OpenCode API error: ${JSON.stringify(result.error)}`);
+      }
+
       return {
-        response: data.response || data.message || '',
-        sessionId: data.sessionId || message.sessionId || '',
+        response: JSON.stringify(result.data),
+        sessionId: sessionId,
       };
     } catch (error) {
       throw new Error(
@@ -171,17 +202,16 @@ export class OpenCodeManager {
     }
 
     try {
-      const baseUrl = `http://127.0.0.1:${project.opencodePort}`;
-      const response = await fetch(`${baseUrl}/api/sessions`, {
-        method: 'GET',
-      });
+      const client = this.getClient(folder);
+      const result = await client.session.list();
 
-      if (!response.ok) {
-        throw new Error(`OpenCode API error: ${response.statusText}`);
+      if (result.error) {
+        throw new Error(`OpenCode API error: ${JSON.stringify(result.error)}`);
       }
 
-      const data = await response.json();
-      return data.sessions || [];
+      // Extract session IDs from the result
+      const sessions = result.data || [];
+      return sessions.map((s: { id?: string }) => s.id || '').filter(Boolean);
     } catch (error) {
       throw new Error(
         `Failed to get sessions: ${error instanceof Error ? error.message : String(error)}`
